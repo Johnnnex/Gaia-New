@@ -142,7 +142,7 @@ add_gaianet_to_path() {
 if check_nvidia_gpu; then
     setup_cuda_env
     # Install CUDA only once (first instance will trigger this)
-    # install_cuda
+    install_cuda
     setup_cuda_env
 fi
 
