@@ -1,14 +1,16 @@
 #!/bin/bash
-
-# ===============================
-#   GaiaNet Multi-Instance Setup
-# ===============================
+# =============================================================================
+# GaiaNet Multi-Instance Setup (Improved)
+# =============================================================================
 
 # Colors for output
 GREEN="\033[0;32m"
 RESET="\033[0m"
 
-# --- System-Wide Dependencies ---
+# -------------------------------
+# System-Wide Dependencies & Checks
+# -------------------------------
+
 echo "📦 Installing system dependencies..."
 sudo apt update -y && sudo apt install -y pciutils libgomp1 curl wget build-essential libglvnd-dev pkg-config libopenblas-dev libomp-dev
 sudo apt upgrade -y && sudo apt update
@@ -22,10 +24,7 @@ else
     echo "🖥️ Running on a native Ubuntu system."
 fi
 
-# -------------------------------
-# Functions (System Checks & Setup)
-# -------------------------------
-
+# Check for NVIDIA GPU presence
 check_nvidia_gpu() {
     if command -v nvidia-smi &> /dev/null || lspci | grep -i nvidia &> /dev/null; then
         echo "✅ NVIDIA GPU detected."
@@ -36,6 +35,7 @@ check_nvidia_gpu() {
     fi
 }
 
+# Determine system type: VPS, Laptop, or Desktop
 check_system_type() {
     vps_type=$(systemd-detect-virt)
     if echo "$vps_type" | grep -qiE "kvm|qemu|vmware|xen|lxc"; then
@@ -50,69 +50,89 @@ check_system_type() {
     fi
 }
 
+# Check if CUDA is installed (by detecting nvcc)
+check_cuda_installed() {
+    if command -v nvcc &> /dev/null; then
+        CUDA_VERSION=$(nvcc --version | grep -oP 'release \K\d+\.\d+' | cut -d. -f1)
+        echo "✅ CUDA version $CUDA_VERSION is already installed."
+        return 0
+    else
+        echo "⚠️ CUDA is not installed."
+        return 1
+    fi
+}
+
+# Set up CUDA environment variables (system-wide)
+setup_cuda_env() {
+    echo "🔧 Setting up CUDA environment variables..."
+    sudo tee /etc/profile.d/cuda.sh > /dev/null <<EOF
+export PATH=/usr/local/cuda-12.8/bin\${PATH:+:\${PATH}}
+export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}
+EOF
+    source /etc/profile.d/cuda.sh
+}
+
+# -------------------------------
+# CUDA Toolkit Installation
+# -------------------------------
+
 install_cuda() {
     if $IS_WSL; then
         echo "🖥️ Installing CUDA for WSL 2..."
         PIN_FILE="cuda-wsl-ubuntu.pin"
         PIN_URL="https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-wsl-ubuntu.pin"
         DEB_FILE="cuda-repo-wsl-ubuntu-12-8-local_12.8.0-1_amd64.deb"
-        DEB_URL="https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda-repo-wsl-ubuntu-12-8-local_12.8.0-1_amd64.deb"
+        DEB_URL="https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/${DEB_FILE}"
     else
         echo "🖥️ Installing CUDA for Ubuntu 24.04..."
         PIN_FILE="cuda-ubuntu2404.pin"
         PIN_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-ubuntu2404.pin"
         DEB_FILE="cuda-repo-ubuntu2404-12-8-local_12.8.0-570.86.10-1_amd64.deb"
-        DEB_URL="https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda-repo-ubuntu2404-12-8-local_12.8.0-570.86.10-1_amd64.deb"
+        DEB_URL="https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/${DEB_FILE}"
     fi
 
     echo "📥 Downloading $PIN_FILE from $PIN_URL..."
     wget "$PIN_URL" || { echo "❌ Failed to download $PIN_FILE"; exit 1; }
-    sudo mv "$PIN_FILE" /etc/apt/preferences.d/cuda-repository-pin-600 || { echo "❌ Failed to move $PIN_FILE"; exit 1; }
 
-    if [ -f "$DEB_FILE" ]; then
-        echo "🗑️ Deleting existing $DEB_FILE..."
-        rm -f "$DEB_FILE"
-    fi
+    sudo mv "$PIN_FILE" /etc/apt/preferences.d/cuda-repository-pin-600 \
+        || { echo "❌ Failed to move $PIN_FILE"; exit 1; }
+
+    # Remove any existing DEB file and download a fresh copy
+    [ -f "$DEB_FILE" ] && { echo "🗑️ Removing existing $DEB_FILE..."; rm -f "$DEB_FILE"; }
     echo "📥 Downloading $DEB_FILE from $DEB_URL..."
     wget "$DEB_URL" || { echo "❌ Failed to download $DEB_FILE"; exit 1; }
 
     sudo dpkg -i "$DEB_FILE" || { echo "❌ Failed to install $DEB_FILE"; exit 1; }
-    sudo cp /var/cuda-repo-*/cuda-*-keyring.gpg /usr/share/keyrings/ || { echo "❌ Failed to copy CUDA keyring"; exit 1; }
+    sudo cp /var/cuda-repo-*/cuda-*-keyring.gpg /usr/share/keyrings/ \
+        || { echo "❌ Failed to copy CUDA keyring"; exit 1; }
 
     echo "🔄 Updating package list..."
-    sudo apt-get update || { echo "❌ Package list update failed"; exit 1; }
+    sudo apt-get update || { echo "❌ Failed to update package list"; exit 1; }
     echo "🔧 Installing CUDA Toolkit 12.8..."
-    sudo apt-get install -y cuda-toolkit-12-8 || { echo "❌ CUDA Toolkit installation failed"; exit 1; }
-    echo "✅ CUDA Toolkit 12.8 installed successfully."
+    sudo apt-get install -y cuda-toolkit-12-8 || { echo "❌ Failed to install CUDA Toolkit 12.8"; exit 1; }
 
+    echo "✅ CUDA Toolkit 12.8 installed successfully."
     setup_cuda_env
 }
 
-setup_cuda_env() {
-    echo "🔧 Setting up CUDA environment variables..."
-    echo 'export PATH=/usr/local/cuda-12.8/bin${PATH:+:${PATH}}' | sudo tee /etc/profile.d/cuda.sh > /dev/null
-    echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' | sudo tee -a /etc/profile.d/cuda.sh > /dev/null
-    source /etc/profile.d/cuda.sh
-}
-
 # -------------------------------
-# GaiaNet-Specific Functions (Per Instance)
+# GaiaNet Installation (Per Instance)
 # -------------------------------
 
-# Modified install_gaianet: installs GaiaNet into a given directory.
+# Install GaiaNet into a given directory.
 install_gaianet() {
     local install_dir="$1"
     echo "🔧 Installing GaiaNet in ${install_dir}..."
-    # Download the installer script into the target directory.
+    # Download installer script into the target directory.
     if command -v nvcc &> /dev/null; then
         CUDA_VERSION=$(nvcc --version | grep 'release' | awk '{print $6}' | cut -d',' -f1 | sed 's/V//g' | cut -d'.' -f1)
         echo "✅ CUDA version detected: $CUDA_VERSION"
         if [[ "$CUDA_VERSION" == "11" || "$CUDA_VERSION" == "12" ]]; then
             echo "🔧 Installing GaiaNet with ggmlcuda $CUDA_VERSION..."
-            curl -sSfL 'https://github.com/GaiaNet-AI/gaianet-node/releases/download/0.4.20/install.sh' -o "${install_dir}/install.sh" \
+            # Using 0.4.21 for GPU-supported installation.
+            curl -sSfL 'https://github.com/GaiaNet-AI/gaianet-node/releases/download/0.4.21/install.sh' -o "${install_dir}/install.sh" \
                 || { echo "❌ Failed to download install.sh"; exit 1; }
             chmod +x "${install_dir}/install.sh"
-            # Change into the installation directory and pass the --base flag so that installation occurs in ${install_dir}
             (cd "$install_dir" && ./install.sh --ggmlcuda "$CUDA_VERSION" --base "$install_dir") \
                 || { echo "❌ GaiaNet installation with CUDA failed."; exit 1; }
             return
@@ -123,30 +143,42 @@ install_gaianet() {
         || { echo "❌ Failed to download install.sh"; exit 1; }
     chmod +x "${install_dir}/install.sh"
     (cd "$install_dir" && ./install.sh --base "$install_dir") \
-        || { echo "❌ GaiaNet installation without GPU failed."; exit 1; }
+        || { echo "❌ GaiaNet installation without GPU support failed."; exit 1; }
 }
 
-
-# Modified add_gaianet_to_path: adds the instance's bin directory to ~/.bashrc.
+# Add the instance's bin directory to PATH in ~/.bashrc
 add_gaianet_to_path() {
     local install_dir="$1"
-    echo "export PATH=${install_dir}/bin:\$PATH" >> ~/.bashrc
-    source ~/.bashrc
+    # Check if already added to avoid duplicate entries.
+    if ! grep -q "${install_dir}/bin" ~/.bashrc; then
+        echo "export PATH=${install_dir}/bin:\$PATH" >> ~/.bashrc
+        echo "✅ Added ${install_dir}/bin to PATH."
+    fi
+    # Update current session
+    export PATH="${install_dir}/bin:$PATH"
 }
 
 # -------------------------------
 # Main Script Execution
 # -------------------------------
 
-# If an NVIDIA GPU is present and CUDA is not yet installed, install CUDA (system-wide).
+# If NVIDIA GPU is present and CUDA is not yet set up, handle CUDA installation.
 if check_nvidia_gpu; then
-    setup_cuda_env
-    # Install CUDA only once (first instance will trigger this)
-    install_cuda
-    setup_cuda_env
+    if ! setup_cuda_env; then
+        echo "⚠️ CUDA environment not set up. Checking CUDA installation..."
+        if check_cuda_installed; then
+            echo "⚠️ CUDA is installed but not set up correctly. Please fix the CUDA environment."
+        else
+            echo "CUDA is not installed. Installing CUDA..."
+            install_cuda || { echo "❌ Failed to install CUDA. Exiting."; exit 1; }
+            setup_cuda_env
+        fi
+    else
+        echo "✅ CUDA environment is already set up."
+    fi
 fi
 
-# Prompt the user for how many instances (directories) to set up (max 4)
+# Prompt for the number of instances (1-4)
 read -p "How many GaiaNet instances do you want to install? (1-4): " NUM_INSTANCES
 if ! [[ "$NUM_INSTANCES" =~ ^[1-4]$ ]]; then
     echo "❌ Please enter a valid number between 1 and 4."
@@ -158,16 +190,15 @@ for (( i=1; i<=NUM_INSTANCES; i++ )); do
     echo "==========================================================="
     echo -e "${GREEN}Setting up GaiaNet instance $i...${RESET}"
     
-    # Define a unique installation directory for this instance.
+    # Define unique installation directory and port for this instance.
     GAIA_DIR="$HOME/gaianet$i"
-    GAIA_PORT="809$i"
+    GAIA_PORT="909$i"
     mkdir -p "$GAIA_DIR" || { echo "❌ Failed to create directory $GAIA_DIR"; exit 1; }
     
     # Install GaiaNet into this directory.
-    # (CUDA is already installed system-wide; each instance uses the same CUDA support.)
     install_gaianet "$GAIA_DIR"
     
-    # Verify installation
+    # Verify installation and add to PATH.
     if [ -f "$GAIA_DIR/bin/gaianet" ]; then
         echo "✅ GaiaNet installed successfully in $GAIA_DIR."
         add_gaianet_to_path "$GAIA_DIR"
@@ -176,10 +207,9 @@ for (( i=1; i<=NUM_INSTANCES; i++ )); do
         exit 1
     fi
 
-    # Determine system type and choose the appropriate config URL.
+    # Determine system type and select configuration URL.
     check_system_type
     SYSTEM_TYPE=$?  # 0: VPS, 1: Laptop, 2: Desktop
-
     if [[ $SYSTEM_TYPE -eq 0 ]]; then
         CONFIG_URL="https://raw.githubusercontent.com/abhiag/Gaia_Node/main/config2.json"
     elif [[ $SYSTEM_TYPE -eq 1 ]]; then
@@ -196,17 +226,17 @@ for (( i=1; i<=NUM_INSTANCES; i++ )); do
         fi
     fi
 
-    # Initialize the GaiaNet node using the configuration.
+    # Initialize GaiaNet for this instance.
     echo "⚙️ Initializing GaiaNet in ${GAIA_DIR}..."
     "$GAIA_DIR/bin/gaianet" init --config "$CONFIG_URL" --base "$GAIA_DIR" || { echo "❌ GaiaNet initialization failed in ${GAIA_DIR}!"; exit 1; }
     
-    # Set the domain, start the node, and then show node info.
-    echo "🚀 Starting GaiaNet node in ${GAIA_DIR}..."
+    # Configure and start the node.
+    echo "🚀 Starting GaiaNet node in ${GAIA_DIR} on port ${GAIA_PORT}..."
     "$GAIA_DIR/bin/gaianet" config --base "$GAIA_DIR" --port "$GAIA_PORT" --domain gaia.domains
-    "$GAIA_DIR/bin/gaianet" start --base "$GAIA_DIR" || { echo "❌ Error: Failed to start GaiaNet node in ${GAIA_DIR}!"; exit 1; }
+    "$GAIA_DIR/bin/gaianet" start --base "$GAIA_DIR" || { echo "❌ Failed to start GaiaNet node in ${GAIA_DIR}!"; exit 1; }
     
     echo "🔍 Fetching GaiaNet node information in ${GAIA_DIR}..."
-    "$GAIA_DIR/bin/gaianet" info --base "$GAIA_DIR" || { echo "❌ Error: Failed to fetch GaiaNet node information in ${GAIA_DIR}!"; exit 1; }
+    "$GAIA_DIR/bin/gaianet" info --base "$GAIA_DIR" || { echo "❌ Failed to fetch node info in ${GAIA_DIR}!"; exit 1; }
 done
 
 # Final message
